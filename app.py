@@ -6,34 +6,61 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 
-# Mengatur konfigurasi halaman web
-st.set_page_config(page_title="OCR Laporan KTP & KK", layout="centered")
+# Konfigurasi Halaman Web
+st.set_page_config(page_title="OCR Kamera Langsung KTP & KK", layout="centered")
 
-st.title("📝 Pindai Dokumen & Pengisian Laporan Otomatis")
-st.write("Unggah 2 KTP (Pemohon & Penjamin) serta 1 KK untuk membuat laporan instan.")
+st.title("📝 OCR KTP & KK + Kamera Langsung Android")
+st.write("Ambil foto dokumen langsung dari kamera HP atau unggah dari galeri untuk mengisi laporan otomatis.")
 
-# Inisialisasi EasyOCR secara otomatis (menggunakan cache agar tidak meload ulang setiap klik)
+# Inisialisasi EasyOCR (Cached agar hemat RAM)
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(['id'], gpu=False)
 
 reader = load_ocr()
 
-def perbaiki_posisi_ktp(img):
-    """Memutar gambar KTP 90 derajat searah jarum jam karena posisi foto miring ke kiri"""
-    return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+def auto_rotate_ocr(img):
+    """
+    Memutar gambar ke 4 sudut untuk mencari posisi terbaik 
+    yang memiliki pembacaan kata kunci KTP terbanyak.
+    """
+    sudut_rotasi = [
+        (0, img),                                      # Normal
+        (90, cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)), # Miring Kiri
+        (180, cv2.rotate(img, cv2.ROTATE_180)),         # Terbalik
+        (270, cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)) # Miring Kanan
+    ]
+    
+    skor_terbaik = -1
+    hasil_terbaik = []
+    gambar_terbaik = img
+    
+    for sudut, img_uji in sudut_rotasi:
+        result = reader.readtext(img_uji, detail=0)
+        teks_gabung = " ".join(result).upper()
+        
+        skor = 0
+        kata_kunci = ['NAMA', 'NIK', 'ALAMAT', 'LAHIR', 'AGAMA', 'KAWIN', 'PROVINSI', 'KABUPATEN', 'KECAMATAN']
+        for kw in kata_kunci:
+            if kw in teks_gabung:
+                skor += 1
+                
+        if skor > skor_terbaik:
+            skor_terbaik = skor
+            hasil_terbaik = result
+            gambar_terbaik = img_uji
+            
+    return hasil_terbaik, gambar_terbaik
 
-def ekstrak_data_ktp(uploaded_file, role="Data"):
+def ekstrak_data_ktp(uploaded_file):
     if uploaded_file is None:
         return {"nama": "-", "alamat": "-", "umur": "-"}
     
-    # Konversi file upload streamlit ke format OpenCV image
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
     
-    # Putar gambar KTP agar tegak lurus
-    img_ready = perbaiki_posisi_ktp(img)
-    result = reader.readtext(img_ready, detail=0)
+    # Jalankan Auto Rotate
+    result, _ = auto_rotate_ocr(img)
     
     nama = "-"
     alamat_komponen = []
@@ -53,13 +80,12 @@ def ekstrak_data_ktp(uploaded_file, role="Data"):
             if text_val and not any(k in text_val.upper() for k in ['SEUMUR', 'KAWIN', 'ISLAM', 'KERJA', 'DARAH', 'WARGA']):
                 alamat_komponen.append(text_val.upper())
 
-        # Ekstrak Umur dari Tanggal Lahir
+        # Ekstrak Umur dari Tanggal Lahir (Menggunakan Tahun Berjalan: 2026)
         if 'LAHIR' in teks_clean or 'TGL' in teks_clean:
             match_tgl = re.search(r'(\d{2})[-/\s](\d{2})[-/\s](\d{4})', teks_clean)
             if match_tgl:
                 tahun_lahir = int(match_tgl.group(3))
-                tahun_sekarang = datetime.now().year
-                umur = f"{tahun_sekarang - tahun_lahir} TH"
+                umur = f"{2026 - tahun_lahir} TH"
 
     alamat_final = " ".join(alamat_komponen)
     alamat_final = re.sub(r'\s+', ' ', alamat_final).strip()
@@ -73,8 +99,7 @@ def cek_hubungan_dari_kk(uploaded_file_kk):
     file_bytes = np.asarray(bytearray(uploaded_file_kk.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
     
-    # KK diproses normal tanpa diputar
-    result = reader.readtext(img, detail=0)
+    result, _ = auto_rotate_ocr(img)
     teks_kk = " ".join(result).upper()
     
     if "ISTERI" in teks_kk or "ISTRI" in teks_kk:
@@ -87,29 +112,44 @@ def cek_hubungan_dari_kk(uploaded_file_kk):
     return "KELUARGA"
 
 # =====================================================================
-# BAGIAN WIDGET UPLOAD PADA BROWSER
+# ANTARMUKA SELEKSI INPUT (GALERI / KAMERA)
 # =====================================================================
-col1, col2 = st.columns(2)
+input_method = st.radio("Pilih Metode Input Dokumen:", ["📸 Kamera HP Langsung", "📁 Unggah File/Galeri"], horizontal=True)
 
-with col1:
-    uploaded_ktp_pemohon = st.file_uploader("📤 Upload KTP Pemohon", type=["png", "jpg", "jpeg"])
+file_pemohon = None
+file_penjamin = None
+file_kk = None
 
-with col2:
-    uploaded_ktp_penjamin = st.file_uploader("📤 Upload KTP Penjamin", type=["png", "jpg", "jpeg"])
+if input_method == "📸 Kamera HP Langsung":
+    st.subheader("1. Ambil Foto KTP Pemohon")
+    file_pemohon = st.camera_input("Foto KTP Pemohon", key="cam_pemohon")
+    
+    st.subheader("2. Ambil Foto KTP Penjamin")
+    file_penjamin = st.camera_input("Foto KTP Penjamin", key="cam_penjamin")
+    
+    st.subheader("3. Ambil Foto KK (Opsional)")
+    file_kk = st.camera_input("Foto KK", key="cam_kk")
 
-uploaded_kk = st.file_uploader("📤 Upload Kartu Keluarga (KK) - Opsional", type=["png", "jpg", "jpeg"])
+else:
+    col1, col2 = st.columns(2)
+    with col1:
+        file_pemohon = st.file_uploader("📤 File KTP Pemohon", type=["png", "jpg", "jpeg"], key="file_pemohon")
+    with col2:
+        file_penjamin = st.file_uploader("📤 File KTP Penjamin", type=["png", "jpg", "jpeg"], key="file_penjamin")
+        
+    file_kk = st.file_uploader("📤 File Kartu Keluarga (KK) - Opsional", type=["png", "jpg", "jpeg"], key="file_kk")
 
-# Tombol untuk memulai proses analisis teks
+# =====================================================================
+# TOMBOL PROSES LAPORAN
+# =====================================================================
 if st.button("🚀 Proses & Buat Laporan", type="primary"):
-    if uploaded_ktp_pemohon and uploaded_ktp_penjamin:
-        with st.spinner("Sedang membaca dokumen dengan OCR... Mohon tunggu..."):
+    if file_pemohon and file_penjamin:
+        with st.spinner("Sistem sedang menganalisis foto & mengekstrak data..."):
             
-            # Jalankan fungsi ekstraksi data
-            data_pemohon = ekstrak_data_ktp(uploaded_ktp_pemohon, "Pemohon")
-            data_penjamin = ekstrak_data_ktp(uploaded_ktp_penjamin, "Penjamin")
-            status_hubungan = cek_hubungan_dari_kk(uploaded_kk)
+            data_pemohon = ekstrak_data_ktp(file_pemohon)
+            data_penjamin = ekstrak_data_ktp(file_penjamin)
+            status_hubungan = cek_hubungan_dari_kk(file_kk)
             
-            # Formulasi format teks laporan
             laporan_text = f"""• Pemohon : {data_pemohon['nama']}
 • Penjamin : {data_penjamin['nama']}
 • Alamat Survey / tinggal : {data_pemohon['alamat']}
@@ -118,30 +158,19 @@ if st.button("🚀 Proses & Buat Laporan", type="primary"):
 • Umur penjamin : {data_penjamin['umur']}
 • Stts hubungan : {status_hubungan}"""
             
-            st.success("Analisis Selesai!")
+            st.success("Proses Ekstraksi Berhasil!")
             
-            # 1. TAMPILAN FORMAT TEKS (Bisa langsung di-copy paste)
+            # Output Teks Siap Copy
             st.subheader("📋 Format Teks Laporan")
-            st.text_area("Klik kanan/blok untuk salin teks di bawah:", laporan_text, height=200)
+            st.text_area("Salin teks di bawah ini:", laporan_text, height=200)
             
-            # 2. TAMPILAN DATA TABEL
-            st.subheader("📊 Preview Tabel Data")
+            # Pembuatan Tabel & Tombol Unduh Excel
             data_excel = {
                 "Kategori Laporan": ["Pemohon", "Penjamin", "Alamat Survey", "Alamat KTP", "Umur Pemohon", "Umur Penjamin", "Status Hubungan"],
-                "Isi Data": [
-                    data_pemohon['nama'], 
-                    data_penjamin['nama'], 
-                    data_pemohon['alamat'], 
-                    data_pemohon['alamat'], 
-                    data_pemohon['umur'], 
-                    data_penjamin['umur'], 
-                    status_hubungan
-                ]
+                "Isi Data": [data_pemohon['nama'], data_penjamin['nama'], data_pemohon['alamat'], data_pemohon['alamat'], data_pemohon['umur'], data_penjamin['umur'], status_hubungan]
             }
             df = pd.DataFrame(data_excel)
-            st.dataframe(df, use_container_width=True)
             
-            # 3. TOMBOL DOWNLOAD EXCEL OTOMATIS
             import io
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer_excel:
@@ -150,9 +179,8 @@ if st.button("🚀 Proses & Buat Laporan", type="primary"):
             st.download_button(
                 label="📥 Download Laporan Excel (.xlsx)",
                 data=buffer.getvalue(),
-                file_name=f"Laporan_Survey_{data_pemohon['nama'].replace(' ', '_')}.xlsx",
+                file_name=f"Laporan_{data_pemohon['nama'].replace(' ', '_')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            
     else:
-        st.error("⚠️ Mohon upload kedua file KTP terlebih dahulu sebelum memproses!")
+        st.error("⚠️ Mohon ambil foto atau unggah KTP Pemohon dan Penjamin terlebih dahulu!")
